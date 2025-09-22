@@ -1,0 +1,80 @@
+---
+title: "peptaibol_list"
+format: html
+editor: visual
+---
+
+##Carregando bibliotecas
+
+```{r}
+library(dplyr)
+library(readxl)
+```
+
+##carregando os dados
+
+```{r}
+peptaibol_list <- read_xlsx("lista_compilada.xlsx")
+```
+
+#O intuito desse script é criar um algoritmo que possa identificar os picos de m/z semelhante nos grupos de espécies de clonostachys avaliadas na produção de peptaibols. Para isso será definido alguns parâmetros
+```{r}
+mz_tolerance <- 0.02
+
+peptaibol_list$match_group <- NA
+group_counter <- 1
+
+for (i in 1:nrow(peptaibol_list)) {
+  
+  # Se a linha atual ainda não foi agrupada
+  if (is.na(peptaibol_list$match_group[i])) {
+    
+    # Encontrar todas as linhas (incluindo a própria linha i) cujo m/z está dentro da tolerância
+    # A função 'abs()' calcula a diferença absoluta (sem sinal negativo)
+    matches_indices <- which(abs(peptaibol_list$mz[i] - peptaibol_list$mz) <= mz_tolerance)
+    
+    # Se encontrou mais de um pico (ou seja, pelo menos um par)
+    if (length(matches_indices) > 1) {
+      # Atribuir o mesmo número de grupo a todos os picos correspondentes
+      peptaibol_list$match_group[matches_indices] <- group_counter
+      group_counter <- group_counter + 1
+    }
+  }
+}
+
+```
+
+
+#exibição dos resultados
+```{r}
+# Filtrar para mostrar apenas as linhas que foram agrupadas
+matched_peaks <- peptaibol_list %>%
+  filter(!is.na(match_group)) %>%
+  arrange(match_group, mz) # Ordenar por grupo e depois por m/z
+
+# adicionando uma coluna de ID para os peptaibols encontrados que são compartilhados
+matched_peaks <- matched_peaks %>%
+  mutate(
+    pep_id = paste0("pep_", as.integer(monoisotopic_mass)),
+    log10_area = log10(area)
+  )
+
+#reordenando as colunas
+matched_peaks_final <- matched_peaks |> 
+  select(match_group, specie, pep_id, monoisotopic_mass, peptaibol_group, everything())
+
+#exportando os dados
+write.csv(peptaibol_list, 
+          file = "pepaibol_all.csv", 
+          row.names = FALSE)
+
+write.csv(matched_peaks_final, 
+          file = "pep_shared_final.csv", 
+          row.names = FALSE)
+
+
+# Imprimir a tabela de resultados no console
+#print("Picos com m/z semelhante encontrados:")
+#print(matched_peaks[, c("specie", "rt", "peptaibol_group", "match_group", "monoisotopic mass")])
+```
+
