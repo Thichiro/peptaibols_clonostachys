@@ -1,8 +1,7 @@
 # peptaibols_clonostachys
-An script made in R language to group and give ID to the previously mass peaks found in MZmine software
 # Análise e Agrupamento de Picos de Espectrometria de Massas de Peptaibois
 
-Este repositório contém um script em R desenvolvido para processar, filtrar e agrupar íons de peptaibois putativos, identificados em espécies do fungo *Clonostachys*, a partir de dados brutos de espectrometria de massas (EM).
+Este repositório contém um script em R desenvolvido para processar, filtrar e agrupar íons de peptaibois putativos, identificados em espécies do fungo *Clonostachys*, a partir de dados pré-tratados de espectrometria de massas (EM) no software MZmine.
 
 ## Contexto
 
@@ -10,27 +9,42 @@ A análise de metabólitos secundários, como os peptaibois, por EM gera uma gra
 
 ## Arquivos no Repositório
 
-* `lista_compilada.xlsx`: O script principal em R que executa toda a análise.
-* `pep_shared_final`: Um arquivo de exemplo com o resultado final gerado pelo script.
+* `peptaibols_unicos.xlsx`: O script principal em R que executa toda a análise.
+* `pep_matriz_filled.xlsx`: Um arquivo de exemplo com o resultado final gerado pelo script.
+* `heatmap_peptaibols.tiff`: Um arquivo de heatmap exemplo de como ficam os agrupamentos dentro de casa espécie de _Clonostachys_
+* `peptaibols_featuregrouping.qmd`: Um arquivo qmd. de exemplo pronto para ser rodado no softwre R
 * `README.md`: Este arquivo de documentação.
 
-## Passo a Passo da Análise
+-   Etapa 1: Preparação e Filtragem dos Dados Iniciais
+O processo começa com uma lista de picos curada, contendo os sinais mais intensos (ex: top 20%) de cada espécie.
 
-O script segue uma sequência lógica de passos para transformar os dados brutos em uma tabela final anotada e organizada.
+Picos redundantes dentro de uma mesma espécie (com massa e tempo de retenção muito similares) são filtrados, mantendo-se apenas o sinal mais intenso como representante.
 
-### 1. Carga e Preparação dos Dados
-O script inicia carregando os dados de uma lista de picos, que contém informações como m/z, tempo de retenção (rt), área do pico e massa monoisotópica.
+Etapa 2: Agrupamento Isotópico
+O script identifica e agrupa picos que são isótopos uns dos outros (M, M+1, M+2), baseando-se nas diferenças de massa teóricas e na proximidade do tempo de retenção.
 
-### 2. Agrupamento de Picos Semelhantes
-Este é o núcleo da análise. Um loop percorre cada pico e o compara com todos os outros.
--   Picos cujo valor de `mz` tem uma diferença menor ou igual a uma tolerância definida (neste caso, `0.02`) são considerados correspondentes.
--   A cada grupo de picos correspondentes é atribuído um `match_group` único para facilitar a identificação.
+Etapa 3: Identificação de Séries Homólogas
+Picos que pertencem a uma mesma família de moléculas, mas que diferem por unidades de metileno (-CH₂), são agrupados. Isso permite identificar peptaibols estruturalmente relacionados que variam, por exemplo, no comprimento de uma cadeia de aminoácidos.
 
-### 3. Criação de Novas Colunas (Engenharia de Atributos)
-Para enriquecer a análise, duas novas colunas foram criadas com a função `mutate()`:
--   `pep_id`: Um identificador único para cada molécula, criado com o prefixo "pep_" seguido pelo valor **inteiro** da massa monoisotópica. Ex: `pep_1441`.
--   `log10_area`: A área do pico transformada para a escala logarítmica de base 10 (`log10(area)`). Isso ajuda a normalizar os dados de abundância para visualizações e análises estatísticas.
+Etapa 4: Agrupamento de Picos Compartilhados (Matching)
+O algoritmo compara os picos entre as diferentes espécies para encontrar moléculas que são compartilhadas pelo grupo de organismos, utilizando tanto a massa representativa quanto o tempo de retenção para garantir a precisão do match.
 
-### 4. Reordenação e Exportação
--   As colunas da tabela final são reordenadas com a função `select()` para colocar as informações mais importantes (como `pep_id`, `match_group` e `specie`) no início, facilitando a inspeção dos dados.
--   O dataframe final, limpo e organizado, é exportado para um arquivo CSV chamado `pep_shared_final.csv`.
+Etapa 5: Criação de IDs Únicos (pep_id)
+Um identificador final e legível é gerado para cada peptaibol. O formato do ID diferencia os picos que são compartilhados entre espécies daqueles que são únicos para uma espécie específica.
+
+Etapa 6: Criação da Matriz de Abundância
+A lista de dados em formato longo é transformada em uma matriz de abundância em formato largo, onde as linhas são os pep_id, as colunas são as specie e as células contêm os valores de log10(area).
+
+Etapa 7: Preenchimento de Lacunas (Gap-Filling)
+Esta é uma etapa avançada e crucial. O script utiliza uma segunda lista de dados, completa e não filtrada, proveniente do MZmine para buscar os picos que foram marcados com área zero na matriz inicial.
+
+A busca é específica para cada lacuna (pep_id, specie) e utiliza critérios rigorosos de massa, tempo de retenção e um limiar mínimo de área para preencher os valores ausentes com dados de baixa intensidade, mas de alta confiança.
+
+Etapa 8: Geração de Resultados
+Tabelas (.xlsx): O script exporta a matriz final preenchida e uma lista separada contendo apenas os peptaibols que foram identificados como exclusivos de uma única espécie.
+
+Heatmaps (.tiff):
+
+Um heatmap com normalização Z-score e clusterização por correlação, ideal para visualizar os padrões relativos de produção dos peptaibols compartilhados.
+
+
