@@ -9,48 +9,224 @@ editor: visual
 ```{r}
 library(dplyr)
 library(readxl)
+library(tidyverse)
+library(pheatmap)
+library(RColorBrewer)
+library(openxlsx)
+library(purrr)
+library(stringr)
 ```
 
 ##carregando os dados
 
 ```{r}
 peptaibol_list <- read_xlsx("lista_compilada.xlsx")
+
+peptaibol_list <- peptaibol_list %>%
+  rename(monoisotopic_mass = `monoisotopic mass`) |> 
+  arrange(monoisotopic_mass) 
+
 ```
 
 #O intuito desse script é criar um algoritmo que possa identificar os picos de m/z semelhante nos grupos de espécies de clonostachys avaliadas na produção de peptaibols. Para isso será definido alguns parâmetros
+
 ```{r}
-mz_tolerance <- 0.02
+mz_tolerance_filter <- 0.02 #tolerância em Daltons para a busca por picos similares
+mz_tolerance <- 0.05
+mz_tolerance_match <- 0.02
+mz_tolerance_isotopic <- 0.1 #tolerancia para byscar por picos isotópicos 
+# Define a tolerância de massa para picos isotópicos (M+1 e M+2)
+# Esses valores são as diferenças de massa teóricas em daltons do Carbono(13)
+mz_iso_M1_diff <- 1.00335
+mz_iso_M2_diff <- 2.0067
+rt_tolerance <- 0.5
+rt_tolerance_match <- 0.5
+serie_mass_diff_1CH2 <- 14.01565 # Massa exata de 1x CH₂
+serie_mass_diff_2CH2 <- 28.03130 # Massa exata de 2x CH₂
 
-peptaibol_list$match_group <- NA
-group_counter <- 1
+# Opcional: veja quantas linhas você tem antes de filtrar
+cat("Número de linhas antes da filtragem:", nrow(peptaibol_list), "\n")
 
-for (i in 1:nrow(peptaibol_list)) {
-  
-  # Se a linha atual ainda não foi agrupada
-  if (is.na(peptaibol_list$match_group[i])) {
+peptaibol_list_filtrado <- peptaibol_list %>%
+  # 1. Agrupa os dados por espécie para que a análise seja feita individualmente
+  group_by(specie) %>%
+  # 2. Ordena por massa dentro de cada espécie. Essencial para o próximo passo.
+  arrange(monoisotopic_mass) %>%
+  # 3. Cria "grupos de similaridade" de massa. Picos com massa muito próxima terão o mesmo ID.
+  # A lógica é: se a diferença para o pico anterior for maior que a tolerância, um novo grupo começa.
+  mutate(similarity_group = cumsum(c(TRUE, diff(monoisotopic_mass) > mz_tolerance_filter))) %>%
+  # 4. Re-agrupa por espécie e pelo grupo de similaridade recém-criado
+  group_by(specie, similarity_group) %>%
+  # 5. Para cada pequeno grupo de picos similares, seleciona APENAS a linha com a maior área
+  slice_max(order_by = area, n = 1, with_ties = FALSE) %>%
+  # 6. Desagrupa para as próximas etapas
+  ungroup() %>%
+  # 7. Remove a coluna auxiliar
+  select(-similarity_group)
+
+cat("Número de linhas após a filtragem:", nrow(peptaibol_list_filtrado), "\n")
+
+# Cria uma coluna para marcar o grupo isotópico
+
+peptaibol_list_filtrado <- peptaibol_list_filtrado %>% arrange(monoisotopic_mass)
+
+# 2. INICIALIZAR a coluna do grupo e um contador.
+peptaibol_list_filtrado$isotopic_group <- NA
+isotopic_group_counter <- 1
+
+# Itera sobre a lista para encontrar picos isotópicos
+for (i in 1:nrow(peptaibol_list_filtrado)) {
+  if (is.na(peptaibol_list_filtrado$isotopic_group[i])) {
+    current_mass <- peptaibol_list_filtrado$monoisotopic_mass[i]
+    current_rt <- peptaibol_list_filtrado$rt[i]
     
-    # Encontrar todas as linhas (incluindo a própria linha i) cujo m/z está dentro da tolerância
-    # A função 'abs()' calcula a diferença absoluta (sem sinal negativo)
-    matches_indices <- which(abs(peptaibol_list$mz[i] - peptaibol_list$mz) <= mz_tolerance)
+    match_M1_index <- which(
+      abs(peptaibol_list_filtrado$rt - current_rt) <= rt_tolerance &
+      abs(peptaibol_list_filtrado$monoisotopic_mass - current_mass - mz_iso_M1_diff) <= mz_tolerance_isotopic &
+      is.na(peptaibol_list_filtrado$isotopic_group)
+    )
     
-    # Se encontrou mais de um pico (ou seja, pelo menos um par)
+    match_M2_index <- which(
+      abs(peptaibol_list_filtrado$rt - current_rt) <= rt_tolerance &
+      abs(peptaibol_list_filtrado$monoisotopic_mass - current_mass - mz_iso_M2_diff) <= mz_tolerance_isotopic &
+      is.na(peptaibol_list_filtrado$isotopic_group)
+    )
+    
+    if (length(match_M1_index) > 0 || length(match_M2_index) > 0) {
+      peptaibol_list_filtrado$isotopic_group[i] <- isotopic_group_counter
+      peptaibol_list_filtrado$isotopic_group[match_M1_index] <- isotopic_group_counter
+      peptaibol_list_filtrado$isotopic_group[match_M2_index] <- isotopic_group_counter
+      isotopic_group_counter <- isotopic_group_counter + 1
+    }
+  }
+}
+
+#etapa para buscar as séries de 14 e 28 carbonos de diferença em relação aos picos encontrados
+peptaibol_list_filtrado <- peptaibol_list_filtrado %>% arrange(monoisotopic_mass)
+peptaibol_list_filtrado$serie_group <- NA
+serie_group_counter <- 1
+
+for (i in 1:nrow(peptaibol_list_filtrado)) {
+  if (is.na(peptaibol_list_filtrado$serie_group[i])) {
+    current_mass <- peptaibol_list_filtrado$monoisotopic_mass[i]
+    
+    # Busca por picos com +1 CH₂ (~14 Da)
+    match_1CH2_index <- which(
+      abs(peptaibol_list_filtrado$monoisotopic_mass - current_mass - serie_mass_diff_1CH2) <= mz_tolerance_filter &
+      is.na(peptaibol_list_filtrado$serie_group)
+    )
+    
+    # Busca por picos com +2 CH₂ (~28 Da)
+    match_2CH2_index <- which(
+      abs(peptaibol_list_filtrado$monoisotopic_mass - current_mass - serie_mass_diff_2CH2) <= mz_tolerance_filter &
+      is.na(peptaibol_list_filtrado$serie_group)
+    )
+    
+    if (length(match_1CH2_index) > 0 || length(match_2CH2_index) > 0) {
+      peptaibol_list_filtrado$serie_group[i] <- serie_group_counter
+      peptaibol_list_filtrado$serie_group[c(match_1CH2_index, match_2CH2_index)] <- serie_group_counter
+      serie_group_counter <- serie_group_counter + 1
+    }
+  }
+}
+
+#Encontra os picos representativos para cada tipo de molécula isótopa, para que na próxima etapa, no agrupamento de moleculas elas sejam levadas em consideração
+representative_masses <- peptaibol_list_filtrado %>%
+  filter(!is.na(isotopic_group)) %>%
+  group_by(isotopic_group) %>%
+  summarise(representative_mass = min(monoisotopic_mass))
+
+peptaibol_list_final <- peptaibol_list_filtrado %>%
+  left_join(representative_masses, by = "isotopic_group") %>%
+  mutate(representative_mass = ifelse(is.na(representative_mass), monoisotopic_mass, representative_mass))
+
+# Para visualizar os resultados, você pode filtrar e ordenar
+isotopic_groups <- peptaibol_list_filtrado %>%
+  filter(!is.na(isotopic_group)) %>%
+  arrange(isotopic_group, monoisotopic_mass)
+
+peptaibol_list_final$match_group <- NA
+match_group_counter <- 1
+
+for (i in 1:nrow(peptaibol_list_final)) {
+  if (is.na(peptaibol_list_final$match_group[i])) {
+    
+    # Pega as propriedades do pico atual
+    current_rep_mass <- peptaibol_list_final$representative_mass[i]
+    current_rt <- peptaibol_list_final$rt[i]
+    
+    # A busca agora verifica AMBAS as condições: massa representativa E tempo de retenção
+    matches_indices <- which(
+      # Condição 1: A diferença de massa representativa está dentro da tolerância
+      abs(peptaibol_list_final$representative_mass - current_rep_mass) <= mz_tolerance_match &
+      # Condição 2: A diferença de RT está dentro da tolerância
+      abs(peptaibol_list_final$rt - current_rt) <= rt_tolerance_match
+    )
+    
+    # Apenas agrupa se encontrar pelo menos um outro pico (em outra espécie)
+    # que atenda a AMBOS os critérios.
     if (length(matches_indices) > 1) {
-      # Atribuir o mesmo número de grupo a todos os picos correspondentes
-      peptaibol_list$match_group[matches_indices] <- group_counter
-      group_counter <- group_counter + 1
+      peptaibol_list_final$match_group[matches_indices] <- match_group_counter
+      match_group_counter <- match_group_counter + 1
     }
   }
 }
 
 ```
 
-
 #exibição dos resultados
+
 ```{r}
+
+# ETAPA 6: CRIAR O ID FINAL (pep_group)
+# ==============================================================================
+# O objetivo é criar um identificador único e informativo para cada peptaibol,
+# seguindo duas regras:
+# 1. Se for compartilhado (tem match_group): iniciais_especie + match_group
+# 2. Se for único (não tem match_group): iniciais_especie + massa inteira
+
+# --- Função Auxiliar para extrair as iniciais ---
+# Esta função pega um nome como "clonostachys chloroleuca" e retorna "cc"
+get_initials <- function(specie_name) {
+  # Divide o nome por espaços ou underscores
+  words <- strsplit(specie_name, "[ _]+")[[1]]
+  # Pega a primeira letra de cada palavra
+  initials <- substring(words, 1, 1)
+  # Junta as letras e converte para minúsculo
+  return(tolower(paste(initials, collapse = "")))
+}
+
+# --- Aplicação da lógica para criar a coluna pep_group ---
+peptaibol_list_final <- peptaibol_list_final %>%
+  # rowwise() garante que a função get_initials seja aplicada a cada linha individualmente
+  rowwise() %>%
+  mutate(
+    # Cria uma coluna temporária com as iniciais da espécie
+    initials = get_initials(specie)
+  ) %>%
+  # ungroup() é importante para que as próximas operações sejam mais rápidas
+  ungroup() %>%
+  mutate(
+    # Agora, cria a coluna 'pep_group' usando uma condição ifelse
+    pep_group = ifelse(
+      # CONDIÇÃO: A linha TEM um valor em 'match_group'?
+      !is.na(match_group),
+      
+      # SE SIM (TRUE): O peptaibol é compartilhado.
+      # Formato: iniciais + "_" + número do match_group
+      paste(initials, match_group, sep = "_"),
+      
+      # SE NÃO (FALSE): O peptaibol é único da espécie.
+      # Formato: iniciais + "_" + parte inteira da massa representativa
+      paste(initials, as.integer(representative_mass), sep = "_")
+    )
+  ) %>%
+  # Remove a coluna auxiliar de iniciais que não é mais necessária
+  select(-initials)
 # Filtrar para mostrar apenas as linhas que foram agrupadas
-matched_peaks <- peptaibol_list %>%
+matched_peaks <- peptaibol_list_final %>%
   filter(!is.na(match_group)) %>%
-  arrange(match_group, mz) # Ordenar por grupo e depois por m/z
+  arrange(match_group, representative_mass) # Ordenar por grupo e depois por m/z
 
 # adicionando uma coluna de ID para os peptaibols encontrados que são compartilhados
 matched_peaks <- matched_peaks %>%
@@ -58,13 +234,22 @@ matched_peaks <- matched_peaks %>%
     pep_id = paste0("pep_", as.integer(monoisotopic_mass)),
     log10_area = log10(area)
   )
+peptaibol_list_final <- peptaibol_list_final |> 
+  mutate(
+    pep_id = paste0("pep_", as.integer(monoisotopic_mass)),
+    log10_area = log10(area)
+  )
+
+
+peptaibol_grouped <- peptaibol_list_final |> 
+  select(pep_id, pep_group, specie, representative_mass, log10_area, rt, match_group, isotopic_group, serie_group)
 
 #reordenando as colunas
 matched_peaks_final <- matched_peaks |> 
-  select(match_group, specie, pep_id, monoisotopic_mass, peptaibol_group, everything())
+  select(pep_id, pep_group, specie, representative_mass, log10_area, rt, peptaibol_group, match_group, isotopic_group, serie_group)
 
 #exportando os dados
-write.csv(peptaibol_list, 
+write.csv(peptaibol_grouped, 
           file = "pepaibol_all.csv", 
           row.names = FALSE)
 
@@ -77,4 +262,272 @@ write.csv(matched_peaks_final,
 #print("Picos com m/z semelhante encontrados:")
 #print(matched_peaks[, c("specie", "rt", "peptaibol_group", "match_group", "monoisotopic mass")])
 ```
+
+#Matriz - Transformando os resultados em tabela larga, isto irá permitir análises futuras como criação de heatmaps e análises de PCA, facilitando a visualização dos dados de bioatividade posteriormente
+
+```{r}
+# --- 7.1: Preparação dos Dados para a Pivotagem (COM MODIFICAÇÕES) ---
+
+# A preparação agora seguirá as novas regras:
+# 1. Renomear 'pep_group' para 'pep_id'.
+# 2. Usar a área MÁXIMA como representante, em vez da soma.
+
+data_for_pivot <- peptaibol_list_final %>%
+  group_by(pep_id, specie) %>%
+  
+  #Cria um resumo usando a área MÁXIMA encontrada para o grupo.
+  # Isso garante que estamos usando o pico mais intenso como quantificador.
+  summarise(representative_area = max(area), .groups = 'drop') %>%
+  # Calcula o log10 da área representativa + 1
+  mutate(log10_area = log10(representative_area + 1))
+
+
+# --- 7.2: Transformando a Tabela de Longa para Larga ---
+
+# A lógica de pivotagem é a mesma, mas agora usa 'pep_id' como as linhas.
+pep_matrix_wide <- data_for_pivot %>%
+  pivot_wider(
+    # A coluna que se tornará as NOVAS LINHAS (agora 'pep_id')
+    id_cols = pep_id,
+    
+    # A coluna cujos valores se tornarão os NOVOS CABEÇALHOS DAS COLUNAS
+    names_from = specie,
+    
+    # A coluna cujos valores preencherão as CÉLULAS da matriz
+    values_from = log10_area
+  )
+
+# --- 7.3: Visualização e Limpeza Final ---
+
+# Substitui NA por 0 para indicar ausência de sinal.
+pep_matrix_wide[is.na(pep_matrix_wide)] <- 0
+
+pep_matrix_wide <- pep_matrix_wide %>%
+  mutate(
+    # A função across() aplica uma operação a um conjunto de colunas.
+    # where(is.numeric) seleciona APENAS as colunas que são numéricas.
+    # ~round(., 2) é a função a ser aplicada: arredondar para 2 casas decimais.
+    across(where(is.numeric), ~round(., 2))
+  )
+
+# Visualiza as primeiras linhas da sua nova matriz
+# A primeira coluna agora se chamará 'pep_id'
+print(head(pep_matrix_wide))
+
+# Use View() no RStudio para uma visualização interativa
+View(pep_matrix_wide)
+```
+
+# carregando os dados da lista mão gerada pelo programa MZmine.Descrição: essa lista está em um formato largo, ou seja, carrega para cada isolado/espécie de organismo analisado uma coluna de cada parâmetro gerado pela análise de espectrometria de massas. POr exemplo, rt, height, mz_range e assim por diante.Nesse momento faremos a filtragem desses dados antes de iniciar o processo da proxima etapa.
+
+```{r}
+mzmine_list <- read_xlsx("mzmine_list.xlsx")
+
+mzmine_list_area <- mzmine_list |> 
+  mutate(pep_id = paste0("pep_", as.integer(monoisotopic_mass))) |> 
+   select(pep_id, monoisotopic_mass,
+         rt, ends_with(":area")) |> 
+  pivot_longer(
+    cols = ends_with(":area"), 
+    names_to = "sample_name",
+    values_to = "area"
+  ) %>%
+  
+  # Filtra picos com área zero
+  filter(area > 0) %>%
+  mutate(
+    # Extrai a base do nome (ex: "chloroleuca_12")
+    specie_base = str_remove(sample_name, "\\.mzML:area$"),
+    # Remove os números do isolado (ex: "_12") para obter apenas a espécie
+    specie_base = str_remove(specie_base, "_[0-9]+$"),
+    # Adiciona o prefixo do gênero para corresponder à sua lista principal
+    specie = paste("Clonostachys", specie_base, sep = " ")
+  ) %>%
+  
+  # Seleciona as colunas finais que vamos usar
+  select(pep_id, monoisotopic_mass, rt, area, specie)
+
+
+
+
+```
+
+#Gap-filling: Esta etapa agora é crucial para que haja o preenchimento das lacunas cuja área dava-se com o valor 0 na lista filtrada peptaibol_list. Portanto o que foi feito. Foi realizado um outro alinhamento de espectros no software MZmine. Desta vez a lista como um todo foi exportada e carregada aqui no R. Dessa lista iremos buscar os valores que não foram preenchidos na nossa lista pep_shared_final reformulando e mostrando que na realidade quando analisamos mais do que os picos 20% mais intensos, é possível encontrar os picos que anteriormente não haviam sido reconhecidos.
+
+
+```{r}
+
+# --- 8.1: Preparar os Dados de Busca (sem alteração): Os dados de busca servirão como a base de bados para encontrar as massas representativas que já foram identificadas. Isso irá auxiliar em quais colunas encontrar para cada uma das espécies na lista completa carregada no passo anterior proveniente do mzmine.
+clean_names <- function(x) str_to_lower(str_squish(x))
+
+peptaibol_list_final <- peptaibol_list_final %>%
+  mutate(specie = clean_names(specie))
+
+mzmine_list_area <- mzmine_list_area %>%
+  mutate(specie = clean_names(specie))
+
+names(pep_matrix_wide)[-1] <- clean_names(names(pep_matrix_wide)[-1])
+
+# --- 8.1: Preparar os Dados de Busca ---
+# 2) Definir massa/RT representativos direto do mzmine_list_area
+pep_id_definitions <- mzmine_list_area %>%
+  group_by(pep_id, specie) %>%
+  slice_max(order_by = area, n = 1, with_ties = FALSE) %>%  # pega o pico mais intenso
+  ungroup() %>%
+  select(
+    pep_id,
+    specie,
+    representative_mass = monoisotopic_mass,
+    representative_rt   = rt
+  )
+
+gaps_to_fill <- pep_matrix_wide %>%
+  pivot_longer(cols = -pep_id, names_to = "specie", values_to = "log10_area") %>%
+  filter(log10_area == 0) %>%
+  left_join(pep_id_definitions, by = c("pep_id", "specie"))
+
+missing_defs <- gaps_to_fill %>% filter(is.na(representative_mass) | is.na(representative_rt))
+if(nrow(missing_defs) > 0) {
+  message("Existem lacunas sem definição de representative_mass/rt (possível mismatch de espécie).")
+  print(distinct(missing_defs, pep_id, specie) %>% head(50))
+}
+
+# --- 8.2: Definir Parâmetros para a Busca ---
+mz_tolerance_fill <- 0.05
+rt_tolerance_fill <- 0.4
+area_tolerance_fill <- 1E3
+
+
+# --- 5) Procurar nos dados da mzmine (com filtros)
+filled_gaps <- gaps_to_fill %>%
+  mutate(
+    found_area = pmap_dbl(
+      list(specie, representative_mass, representative_rt),
+      function(specie_i, mz_i, rt_i) {
+        if(is.na(specie_i) || is.na(mz_i) || is.na(rt_i)) return(NA_real_)
+        matches <- mzmine_list_area %>%
+          filter(
+            specie == specie_i,
+            abs(monoisotopic_mass - mz_i) <= mz_tolerance_fill,
+            abs(rt - rt_i) <= rt_tolerance_fill,
+            area >= area_tolerance_fill
+          )
+        if(nrow(matches) == 0) return(NA_real_) else return(max(matches$area, na.rm = TRUE))
+      }
+    )
+  )
+
+final_filled_values <- filled_gaps %>%
+  filter(!is.na(found_area)) %>%
+  mutate(log10_area_filled = log10(found_area + 1)) %>%
+  select(pep_id, specie, log10_area_filled)
+
+pep_matrix_filled <- pep_matrix_wide %>%
+  pivot_longer(cols = -pep_id, names_to = "specie", values_to = "log10_area") %>%
+  left_join(final_filled_values, by = c("pep_id", "specie")) %>%
+  mutate(
+    final_log10_area = ifelse(!is.na(log10_area_filled), log10_area_filled, log10_area)
+  ) %>%
+  select(pep_id, specie, final_log10_area) %>%
+  pivot_wider(
+    id_cols = pep_id,
+    names_from = specie,
+    values_from = final_log10_area
+  ) %>%
+  mutate(
+    across(where(is.numeric), ~round(., 2))
+  )
+# Visualiza a nova matriz preenchida
+print(head(pep_matrix_filled))
+
+matriz_excel <- as.data.frame(pep_matrix_filled)
+
+print(head(matriz_excel))
+
+matriz_peptaibols <- "matriz_peptaibols.xlsx"
+
+write.xlsx(
+  matriz_excel,
+  file = matriz_peptaibols,
+  asTable = TRUE,
+  overwrite = TRUE
+)
+
+cat("matriz_peptaibols.xlsx", matriz_excel, "salvo com sucesso!")
+```
+
+#Heatmap
+
+```{r}
+heatmap_data <- pep_matrix_filled %>%
+  # tibble::column_to_rownames() é uma função auxiliar perfeita para isso
+  tibble::column_to_rownames("pep_id")
+heatmap_matrix <- as.matrix(heatmap_data)
+
+# 2. !! NOVA ETAPA DE LIMPEZA !!
+# Identifica e remove as linhas com variância zero.
+# A função apply(..., 1, sd) calcula o desvio padrão para cada linha.
+sds <- apply(heatmap_matrix, 1, sd)
+
+# Mantemos apenas as linhas cujo desvio padrão é maior que zero.
+heatmap_matrix_filtrada <- heatmap_matrix[sds > 0, ]
+
+cat("Número de linhas original:", nrow(heatmap_matrix), "\n")
+cat("Número de linhas após remover variância zero:", nrow(heatmap_matrix_filtrada), "\n")
+
+# Começamos com a matriz preenchida, antes de qualquer filtragem
+peptaibols_unicos <- pep_matrix_filled %>%
+  # Transforma em formato longo para facilitar a contagem
+  pivot_longer(cols = -pep_id, names_to = "specie", values_to = "log10_area") %>%
+  # Mantém apenas as detecções reais (área > 0)
+  filter(log10_area > 0) %>%
+  # Agrupa por pep_id e conta em quantas espécies ele aparece
+  group_by(pep_id) %>%
+  summarise(
+    n_species = n(), # Conta o número de espécies
+    specie_unica = first(specie), # Guarda o nome da espécie
+    area_detectada = first(log10_area) # Guarda a área
+  ) %>%
+  # Filtra apenas aqueles que apareceram em UMA única espécie
+  filter(n_species == 1) %>%
+  # Arredonda a área para melhor visualização
+  mutate(area_detectada = round(area_detectada, 2)) |> 
+  arrange(specie_unica)
+
+cat("--- Peptaibols Únicos Encontrados ---\n")
+print(peptaibols_unicos)
+
+pep_unico <- as.data.frame(peptaibols_unicos)
+peptaibols_unicos <- "peptaibols_unicos.xlsx"
+
+write.xlsx(
+  pep_unico,
+  file = peptaibols_unicos,
+  asTable = TRUE,
+  overwrite = TRUE
+)
+
+# 1. Primeiro, criamos a função de gradiente de cores a partir da paleta "YlGnBu"
+minha_cor <- colorRampPalette(brewer.pal(n = 9, name = "YlGnBu"))(50)
+
+heatmap_peptaibols <- pheatmap(
+  heatmap_matrix_filtrada, # <--- Use a matriz limpa aqui
+  scale = "row",
+  color = minha_cor,
+  clustering_distance_rows = "correlation",
+  clustering_distance_cols = "euclidean",
+  fontsize_row = 6,
+  fontsize_col = 10,
+  angle_col = 45,
+  border_color = "grey60",
+  filename = "heatmap_peptaibols.tiff",
+  width = 10,
+  height = 12
+)
+
+```
+
+
+
+
 
