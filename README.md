@@ -40,7 +40,9 @@ Esta é uma etapa avançada e crucial. O script utiliza uma segunda lista de dad
 
 A busca é específica para cada lacuna (pep_id, specie) e utiliza critérios rigorosos de massa, tempo de retenção e um limiar mínimo de área para preencher os valores ausentes com dados de baixa intensidade, mas de alta confiança.
 
-Etapa 8: Geração de Resultados
+Etapa 8: Anotação de compostos putativos por meio de busca em banco de dados contendo uma lista das posssíveis moléculas presentes nos extratos de Clonostachys
+
+Etapa 9: Geração de Resultados
 Tabelas (.xlsx): O script exporta a matriz final preenchida e uma lista separada contendo apenas os peptaibols que foram identificados como exclusivos de uma única espécie.
 
 Heatmaps (.tiff):
